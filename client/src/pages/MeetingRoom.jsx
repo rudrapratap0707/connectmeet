@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react';
+import { useNavigate, useParams } from 'react-router-dom'; // ✅ Fixed Import
 import toast from 'react-hot-toast';
 import { Loader2, Lock } from 'lucide-react';
 import VideoTile from '../components/VideoTile.jsx';
@@ -36,7 +36,7 @@ export default function MeetingRoom() {
       .finally(() => setChecking(false));
   }, [meetingId]);
 
-  // FIX 1: Stable WebRTC hook instantiation without creating new object reference every render
+  // STABLE WEBRTC HOOK PARAMS
   const rtcParams = useMemo(
     () => ({
       meetingId: joined ? meetingId : null,
@@ -85,10 +85,8 @@ export default function MeetingRoom() {
   const handleToggleCamera = () => setCamOn(rtc.toggleCamera());
   const handleToggleMic = () => setMicOn(rtc.toggleMic());
 
-  // FIX 2: Correct Screen share toggle state tracking
   const handleToggleShare = async () => {
     if (sharing) {
-      // User clicked stop sharing
       setSharing(false);
       return;
     }
@@ -165,17 +163,15 @@ export default function MeetingRoom() {
 
   const peerList = Object.entries(rtc.peers);
 
-  // Deduplicate peers by key (socketId)
+  // Map ke through key-level deduplication
   const uniquePeers = Array.from(
     new Map(peerList.map(([id, peer]) => [id, peer])).entries()
   );
 
-  // Active remote peer (if someone else is in room)
   const activePeerEntry = uniquePeers[0];
   const activePeerSocketId = activePeerEntry ? activePeerEntry[0] : null;
   const activePeer = activePeerEntry ? activePeerEntry[1] : null;
 
-  // Grid list filter: excludes activePeer from grid to avoid duplicate tiles
   const gridPeers = uniquePeers.filter(
     ([id]) => id !== activePeerSocketId
   );
@@ -194,7 +190,7 @@ export default function MeetingRoom() {
       )}
 
       <main className="px-6 max-w-5xl mx-auto">
-        {/* Main Stage: Shows active remote peer or local user if alone */}
+        {/* Stage Area */}
         <div className="max-w-2xl mx-auto mb-8">
           <VideoTile
             stream={activePeer ? activePeer.stream : rtc.localStream}
@@ -207,9 +203,8 @@ export default function MeetingRoom() {
           />
         </div>
 
-        {/* FIX 3: No duplicates - Grid includes non-active peers + local user */}
+        {/* Grid Area */}
         <div className="flex flex-wrap justify-center gap-4">
-          {/* Always show local user in grid when someone else is on stage */}
           {activePeer && (
             <div className="w-32">
               <VideoTile
@@ -222,7 +217,6 @@ export default function MeetingRoom() {
             </div>
           )}
 
-          {/* Render remaining peers */}
           {gridPeers.map(([socketId, peer]) => (
             <div className="w-32" key={socketId}>
               <VideoTile
