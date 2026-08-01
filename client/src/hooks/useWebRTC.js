@@ -8,8 +8,10 @@ const ICE_SERVERS = {
   ],
 };
 
-// Manages a full-mesh WebRTC setup for small rooms (2-4 people), using
-// Socket.IO purely as the signaling channel. Media itself is peer-to-peer.
+/**
+ * Manages a full-mesh WebRTC setup for small rooms (2-4 people), using
+ * Socket.IO purely as the signaling channel. Media itself is peer-to-peer.
+ */
 export function useWebRTC({ meetingId, name }) {
   const [localStream, setLocalStream] = useState(null);
   const [peers, setPeers] = useState({}); // socketId -> { stream, name, cameraOn, micOn }
@@ -23,12 +25,13 @@ export function useWebRTC({ meetingId, name }) {
   // Debugging logs for monitoring peer state changes
   useEffect(() => {
     if (socketRef.current) {
-      console.log("[WebRTC Debug] Socket ID:", socketRef.current.id);
-      console.log("[WebRTC Debug] Connected Peers:", peers);
-      console.log("[WebRTC Debug] Peer Count:", Object.keys(peers).length);
+      console.log('[WebRTC Debug] Socket ID:', socketRef.current.id);
+      console.log('[WebRTC Debug] Connected Peers:', peers);
+      console.log('[WebRTC Debug] Peer Count:', Object.keys(peers).length);
     }
   }, [peers]);
 
+  // Remove peer connection and state cleanup
   const removePeer = useCallback((socketId) => {
     const pc = peerConnections.current[socketId];
     if (pc) {
@@ -42,21 +45,28 @@ export function useWebRTC({ meetingId, name }) {
     });
   }, []);
 
+  // Helper to construct RTCPeerConnection and bind event listeners
   const createPeerConnection = useCallback((socketId, remoteName) => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
+    // Add local stream tracks to connection
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         pc.addTrack(track, localStreamRef.current);
       });
     }
 
+    // ICE candidate handling
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        socketRef.current?.emit('webrtc:ice-candidate', { to: socketId, candidate: event.candidate });
+        socketRef.current?.emit('webrtc:ice-candidate', {
+          to: socketId,
+          candidate: event.candidate,
+        });
       }
     };
 
+    // Track listener for remote video/audio streams
     pc.ontrack = (event) => {
       setPeers((prev) => ({
         ...prev,
@@ -67,6 +77,7 @@ export function useWebRTC({ meetingId, name }) {
       }));
     };
 
+    // Connection lifecycle monitoring
     pc.onconnectionstatechange = () => {
       if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
         removePeer(socketId);
@@ -78,7 +89,7 @@ export function useWebRTC({ meetingId, name }) {
   }, [removePeer]);
 
   useEffect(() => {
-    // FIX 1: Guard clause to avoid socket initialization when meetingId or name is not ready
+    // Guard clause: do not run until parameters are provided
     if (!meetingId || !name) return;
 
     let active = true;
@@ -96,13 +107,12 @@ export function useWebRTC({ meetingId, name }) {
         const socket = connectSocket();
         socketRef.current = socket;
 
-        // Socket join logic handling both new connect and existing connection states
+        // Join room callback function
         const handleJoinRoom = () => {
           setConnected(true);
           socket.emit('room:join', { meetingId, name });
         };
 
-        // FIX 2: Safely bind connect handler without duplicate subscriptions
         socket.off('connect', handleJoinRoom);
         socket.on('connect', handleJoinRoom);
 
@@ -112,31 +122,35 @@ export function useWebRTC({ meetingId, name }) {
           handleJoinRoom();
         }
 
-        // Handle initial room participants when joining
+        // ============================================================
+        // SIGNALING HANDLERS
+        // ============================================================
+
+        // 1. Initial Room Participants upon joining
         socket.on('room:participants', (list) => {
           list.forEach(({ socketId, name: peerName }) => {
-            // FIX 3: Ignore self in participant list
-            if (socketId === socket.id) return;
+            if (socketId === socket.id) return; // Ignore self
             if (peerConnections.current[socketId]) return;
 
             const pc = createPeerConnection(socketId, peerName);
             setPeers((prev) => ({
               ...prev,
-              [socketId]: { ...(prev[socketId] || {}), name: peerName, cameraOn: true, micOn: true }
+              [socketId]: { ...(prev[socketId] || {}), name: peerName, cameraOn: true, micOn: true },
             }));
 
+            // Create and emit initial Offer to existing participants
             pc.createOffer()
               .then((offer) => pc.setLocalDescription(offer).then(() => offer))
               .then((offer) => socket.emit('webrtc:offer', { to: socketId, offer }))
-              .catch((err) => console.error('Error creating offer:', err));
+              .catch((err) => console.error('[WebRTC Error] Offer creation failed on room:participants:', err));
           });
         });
 
-        // FIX 4: Ignore self on user:joined event
-        socket.on('user:joined', ({ socketId, name: peerName }) => {
+        // 2. FIX: New User Joins -> Existing participants create & send WebRTC Offer
+        socket.on('user:joined', async ({ socketId, name: peerName }) => {
           if (socketId === socket.id || peerConnections.current[socketId]) return;
 
-          createPeerConnection(socketId, peerName);
+          const pc = createPeerConnection(socketId, peerName);
 
           setPeers((prev) => ({
             ...prev,
@@ -147,8 +161,17 @@ export function useWebRTC({ meetingId, name }) {
               micOn: true,
             },
           }));
+
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('webrtc:offer', { to: socketId, offer });
+          } catch (err) {
+            console.error('[WebRTC Error] Offer creation failed on user:joined:', err);
+          }
         });
 
+        // 3. Receive WebRTC Offer & respond with Answer
         socket.on('webrtc:offer', async ({ from, offer }) => {
           let pc = peerConnections.current[from];
 
@@ -158,7 +181,7 @@ export function useWebRTC({ meetingId, name }) {
 
           try {
             if (pc.signalingState !== 'stable') {
-              console.log('Ignoring offer, signalingState is:', pc.signalingState);
+              console.warn(`[WebRTC Warn] Ignoring offer from ${from}: signalingState is ${pc.signalingState}`);
               return;
             }
 
@@ -167,40 +190,42 @@ export function useWebRTC({ meetingId, name }) {
             await pc.setLocalDescription(answer);
             socket.emit('webrtc:answer', { to: from, answer });
           } catch (err) {
-            console.error('Offer handling error:', err);
+            console.error('[WebRTC Error] Offer handling failed:', err);
           }
         });
 
+        // 4. Receive WebRTC Answer
         socket.on('webrtc:answer', async ({ from, answer }) => {
           const pc = peerConnections.current[from];
-
           if (!pc) return;
 
           try {
             if (pc.signalingState === 'have-local-offer') {
               await pc.setRemoteDescription(new RTCSessionDescription(answer));
             } else {
-              console.warn(`Ignored answer from ${from}: signalingState is ${pc.signalingState}`);
+              console.warn(`[WebRTC Warn] Ignored answer from ${from}: signalingState is ${pc.signalingState}`);
             }
           } catch (err) {
-            console.warn('Remote answer ignored:', err.message);
+            console.warn('[WebRTC Warn] Remote answer error:', err.message);
           }
         });
 
+        // 5. ICE Candidates handling
         socket.on('webrtc:ice-candidate', async ({ from, candidate }) => {
           const pc = peerConnections.current[from];
-
           if (!pc || !candidate) return;
 
           try {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
           } catch (err) {
-            console.warn('ICE failed:', err.message);
+            console.warn('[WebRTC Warn] ICE addition failed:', err.message);
           }
         });
 
+        // 6. User Leaves Room
         socket.on('user:left', ({ socketId }) => removePeer(socketId));
 
+        // 7. Media Status Sync (Mic / Camera toggle by peer)
         socket.on('media:status', ({ socketId, cameraOn, micOn }) => {
           setPeers((prev) => ({
             ...prev,
@@ -237,6 +262,7 @@ export function useWebRTC({ meetingId, name }) {
     };
   }, [meetingId, name, createPeerConnection, removePeer]);
 
+  // Controls: Camera Toggle
   const toggleCamera = useCallback(() => {
     const stream = localStreamRef.current;
     if (!stream) return false;
@@ -247,6 +273,7 @@ export function useWebRTC({ meetingId, name }) {
     return track.enabled;
   }, []);
 
+  // Controls: Microphone Toggle
   const toggleMic = useCallback(() => {
     const stream = localStreamRef.current;
     if (!stream) return false;
@@ -257,6 +284,7 @@ export function useWebRTC({ meetingId, name }) {
     return track.enabled;
   }, []);
 
+  // Controls: Screen Share
   const shareScreen = useCallback(async () => {
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -284,6 +312,7 @@ export function useWebRTC({ meetingId, name }) {
     }
   }, []);
 
+  // Controls: Chat Messaging
   const sendChatMessage = useCallback(
     (sender, message) => {
       getSocket().emit('chat:message', { meetingId, sender, message });
