@@ -20,6 +20,15 @@ export function useWebRTC({ meetingId, name }) {
   const localStreamRef = useRef(null);
   const socketRef = useRef(null);
 
+  // Debugging logs for monitoring peer state changes
+  useEffect(() => {
+    if (socketRef.current) {
+      console.log("[WebRTC Debug] Socket ID:", socketRef.current.id);
+      console.log("[WebRTC Debug] Connected Peers:", peers);
+      console.log("[WebRTC Debug] Peer Count:", Object.keys(peers).length);
+    }
+  }, [peers]);
+
   const removePeer = useCallback((socketId) => {
     const pc = peerConnections.current[socketId];
     if (pc) {
@@ -69,6 +78,9 @@ export function useWebRTC({ meetingId, name }) {
   }, [removePeer]);
 
   useEffect(() => {
+    // FIX 1: Guard clause to avoid socket initialization when meetingId or name is not ready
+    if (!meetingId || !name) return;
+
     let active = true;
 
     const init = async () => {
@@ -90,15 +102,21 @@ export function useWebRTC({ meetingId, name }) {
           socket.emit('room:join', { meetingId, name });
         };
 
+        // FIX 2: Safely bind connect handler without duplicate subscriptions
+        socket.off('connect', handleJoinRoom);
         socket.on('connect', handleJoinRoom);
 
-        if (socket.connected) {
+        if (!socket.connected) {
+          socket.connect();
+        } else {
           handleJoinRoom();
         }
 
         // Handle initial room participants when joining
         socket.on('room:participants', (list) => {
           list.forEach(({ socketId, name: peerName }) => {
+            // FIX 3: Ignore self in participant list
+            if (socketId === socket.id) return;
             if (peerConnections.current[socketId]) return;
 
             const pc = createPeerConnection(socketId, peerName);
@@ -114,9 +132,9 @@ export function useWebRTC({ meetingId, name }) {
           });
         });
 
-        // FIX 1: Create Peer Connection when a new user joins the room
+        // FIX 4: Ignore self on user:joined event
         socket.on('user:joined', ({ socketId, name: peerName }) => {
-          if (peerConnections.current[socketId]) return;
+          if (socketId === socket.id || peerConnections.current[socketId]) return;
 
           createPeerConnection(socketId, peerName);
 
@@ -131,7 +149,6 @@ export function useWebRTC({ meetingId, name }) {
           }));
         });
 
-        // FIX 2: Pass fallback remote name when handling unexpected incoming offer
         socket.on('webrtc:offer', async ({ from, offer }) => {
           let pc = peerConnections.current[from];
 
@@ -170,7 +187,6 @@ export function useWebRTC({ meetingId, name }) {
           }
         });
 
-        // FIX 3: Resilient ICE candidate addition without hard-dropping candidates
         socket.on('webrtc:ice-candidate', async ({ from, candidate }) => {
           const pc = peerConnections.current[from];
 
@@ -219,8 +235,7 @@ export function useWebRTC({ meetingId, name }) {
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
       disconnectSocket();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingId]);
+  }, [meetingId, name, createPeerConnection, removePeer]);
 
   const toggleCamera = useCallback(() => {
     const stream = localStreamRef.current;
