@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom'; // ✅ Fixed Import
+import { useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { Loader2, Lock } from 'lucide-react';
+import { Loader2, Lock, Pin, Maximize2, Monitor } from 'lucide-react';
 import VideoTile from '../components/VideoTile.jsx';
 import ControlBar from '../components/ControlBar.jsx';
 import ChatPanel from '../components/ChatPanel.jsx';
@@ -28,6 +28,9 @@ export default function MeetingRoom() {
   const [unreadChat, setUnreadChat] = useState(0);
   const [showMemory, setShowMemory] = useState(false);
 
+  // Pinning / Selected Peer State
+  const [selectedPeerId, setSelectedPeerId] = useState(null);
+
   useEffect(() => {
     api
       .get(`/meetings/${meetingId}`)
@@ -36,7 +39,7 @@ export default function MeetingRoom() {
       .finally(() => setChecking(false));
   }, [meetingId]);
 
-  // STABLE WEBRTC HOOK PARAMS
+  // Stable WebRTC params
   const rtcParams = useMemo(
     () => ({
       meetingId: joined ? meetingId : null,
@@ -108,6 +111,60 @@ export default function MeetingRoom() {
     navigate('/workspace');
   };
 
+  // Fullscreen toggle on double click
+  const handleDoubleClick = (e) => {
+    if (e.currentTarget.requestFullscreen) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        e.currentTarget.requestFullscreen().catch(() => {});
+      }
+    }
+  };
+
+  const peerList = Object.entries(rtc.peers);
+
+  // Key-level deduplication
+  const uniquePeers = useMemo(
+    () => Array.from(new Map(peerList.map(([id, peer]) => [id, peer])).entries()),
+    [peerList]
+  );
+
+  // 1. IMPROVEMENT: Reset selectedPeerId if pinned peer leaves the meeting
+  useEffect(() => {
+    if (selectedPeerId && !uniquePeers.some(([id]) => id === selectedPeerId)) {
+      setSelectedPeerId(null);
+    }
+  }, [uniquePeers, selectedPeerId]);
+
+  // 2. IMPROVEMENT: Screen Share Priority Auto-Focus
+  const sharingPeerEntry = useMemo(
+    () => uniquePeers.find(([, peer]) => peer.isSharing),
+    [uniquePeers]
+  );
+
+  const activePeerSocketId = useMemo(() => {
+    // Priority A: Local Screen Share
+    if (sharing) return 'local-share';
+    // Priority B: Remote Peer Screen Share
+    if (sharingPeerEntry) return sharingPeerEntry[0];
+    // Priority C: User explicitly pinned peer
+    if (selectedPeerId && uniquePeers.some(([id]) => id === selectedPeerId)) return selectedPeerId;
+    // Priority D: First remote peer
+    return uniquePeers[0]?.[0] || null;
+  }, [sharing, sharingPeerEntry, selectedPeerId, uniquePeers]);
+
+  const activePeer = useMemo(() => {
+    if (activePeerSocketId === 'local-share') return null;
+    return uniquePeers.find(([id]) => id === activePeerSocketId)?.[1];
+  }, [activePeerSocketId, uniquePeers]);
+
+  // Filmstrip list containing all peers (excluding currently focused peer)
+  const gridPeers = useMemo(
+    () => uniquePeers.filter(([id]) => id !== activePeerSocketId),
+    [uniquePeers, activePeerSocketId]
+  );
+
   if (checking) {
     return (
       <div className="min-h-screen bg-obsidian text-pearl flex items-center justify-center">
@@ -161,95 +218,145 @@ export default function MeetingRoom() {
     );
   }
 
-  const peerList = Object.entries(rtc.peers);
-
-  // Map ke through key-level deduplication
-  const uniquePeers = Array.from(
-    new Map(peerList.map(([id, peer]) => [id, peer])).entries()
-  );
-
-  const activePeerEntry = uniquePeers[0];
-  const activePeerSocketId = activePeerEntry ? activePeerEntry[0] : null;
-  const activePeer = activePeerEntry ? activePeerEntry[1] : null;
-
-  const gridPeers = uniquePeers.filter(
-    ([id]) => id !== activePeerSocketId
-  );
-
   return (
-    <div className="min-h-screen bg-obsidian text-pearl relative pb-32">
-      <header className="px-6 py-5 text-center">
-        <h1 className="text-lg font-bold">{meetingInfo?.title}</h1>
-        <p className="text-xs text-pearl/40 mt-0.5">{meetingId}</p>
+    <div className="min-h-screen bg-obsidian text-pearl relative flex flex-col justify-between overflow-hidden select-none">
+      {/* Top Header */}
+      <header className="px-6 py-3 flex items-center justify-between border-b border-pearl/5 bg-graphite/30 backdrop-blur-md">
+        <div>
+          <h1 className="text-base font-bold flex items-center gap-2">
+            {meetingInfo?.title || 'ConnectMeet'}
+            <span className="text-xs font-normal px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              Live
+            </span>
+          </h1>
+          <p className="text-xs text-pearl/40">{meetingId}</p>
+        </div>
+        <div className="text-xs text-pearl/50 flex items-center gap-2">
+          <span>🔒 End-to-End Encrypted</span>
+        </div>
       </header>
 
       {rtc.error && (
-        <div className="mx-auto max-w-md bg-coral/10 border border-coral/30 text-coral text-sm rounded-lg px-4 py-3 text-center mb-6">
+        <div className="mx-auto max-w-md bg-coral/10 border border-coral/30 text-coral text-xs rounded-lg px-4 py-2 text-center mt-2">
           {rtc.error}
         </div>
       )}
 
-      <main className="px-6 max-w-5xl mx-auto">
+      {/* Main Stage (Google Meet Layout) */}
+      <main className="flex-1 flex flex-col p-4 max-w-6xl w-full mx-auto justify-between gap-4 relative">
         {/* Stage Area */}
-        <div className="max-w-2xl mx-auto mb-8">
+        <div
+          className="flex-1 min-h-[360px] max-h-[580px] relative rounded-2xl overflow-hidden border border-pearl/10 bg-graphite/40 shadow-2xl transition-all duration-300"
+          onDoubleClick={handleDoubleClick}
+        >
           <VideoTile
-            stream={activePeer ? activePeer.stream : rtc.localStream}
-            name={activePeer ? activePeer.name : `${user?.name} (you)`}
-            muted={!activePeer}
+            stream={
+              sharing
+                ? rtc.screenStream || rtc.localStream
+                : activePeer
+                ? activePeer.stream
+                : rtc.localStream
+            }
+            name={
+              sharing
+                ? `${user?.name} (Presenting)`
+                : activePeer
+                ? activePeer.isSharing
+                  ? `${activePeer.name} (Presenting)`
+                  : activePeer.name
+                : `${user?.name} (you)`
+            }
+            muted={sharing || !activePeer}
             micOn={activePeer ? activePeer.micOn : micOn}
-            cameraOn={activePeer ? activePeer.cameraOn : camOn}
-            isSpeaking
+            cameraOn={sharing ? true : activePeer ? activePeer.cameraOn : camOn}
+            // 3. IMPROVEMENT: Dynamic speaker highlight (driven by audio activity)
+            isSpeaking={activePeer ? Boolean(activePeer.isSpeaking) : Boolean(rtc.isSpeaking)}
             large
+          />
+
+          {/* Pin/Presentation Indicator Overlay */}
+          <div className="absolute top-4 left-4 z-10 bg-obsidian/80 backdrop-blur-md px-3 py-1.5 rounded-full text-xs flex items-center gap-1.5 text-pearl/90 border border-pearl/10">
+            {sharing || activePeer?.isSharing ? (
+              <>
+                <Monitor size={13} className="text-emerald-400 animate-pulse" />
+                <span>
+                  {sharing ? 'You are presenting' : `${activePeer?.name} is presenting`}
+                </span>
+              </>
+            ) : (
+              <>
+                <Pin size={12} className="text-coral" />
+                <span>{activePeer ? activePeer.name : `${user?.name} (Pinned)`}</span>
+              </>
+            )}
+          </div>
+
+          <div
+            className="absolute top-4 right-4 z-10 opacity-0 hover:opacity-100 transition-opacity bg-obsidian/70 backdrop-blur-md p-2 rounded-lg text-pearl/80 cursor-pointer"
+            title="Double click video for fullscreen"
+          >
+            <Maximize2 size={14} />
+          </div>
+        </div>
+
+        {/* 4. IMPROVEMENT: Google Meet Floating Picture-in-Picture Self Preview */}
+        <div className="absolute bottom-20 right-6 z-20 w-44 h-28 rounded-xl overflow-hidden border-2 border-pearl/20 shadow-2xl hover:scale-105 transition-transform cursor-pointer bg-obsidian">
+          <VideoTile
+            stream={rtc.localStream}
+            name={`${user?.name} (You)`}
+            muted
+            micOn={micOn}
+            cameraOn={camOn}
+            isSpeaking={Boolean(rtc.isSpeaking)}
           />
         </div>
 
-        {/* Grid Area */}
-        <div className="flex flex-wrap justify-center gap-4">
-          {activePeer && (
-            <div className="w-32">
-              <VideoTile
-                stream={rtc.localStream}
-                name={`${user?.name} (you)`}
-                muted
-                micOn={micOn}
-                cameraOn={camOn}
-              />
-            </div>
-          )}
-
+        {/* Bottom Filmstrip Grid (Remote Peers Only) */}
+        <div className="flex items-center justify-center gap-3 overflow-x-auto py-2 px-1 scrollbar-none pr-48">
           {gridPeers.map(([socketId, peer]) => (
-            <div className="w-32" key={socketId}>
+            <div
+              key={socketId}
+              className={`w-36 h-24 flex-shrink-0 cursor-pointer rounded-xl overflow-hidden border-2 transition-all duration-200 transform hover:scale-105 ${
+                selectedPeerId === socketId ? 'border-coral shadow-lg' : 'border-pearl/10 hover:border-pearl/40'
+              }`}
+              onClick={() => setSelectedPeerId(socketId)}
+              title={`Click to focus on ${peer.name}`}
+            >
               <VideoTile
                 stream={peer.stream}
                 name={peer.name}
                 micOn={peer.micOn}
                 cameraOn={peer.cameraOn}
+                isSpeaking={Boolean(peer.isSpeaking)}
               />
             </div>
           ))}
         </div>
       </main>
 
-      <ControlBar
-        micOn={micOn}
-        cameraOn={camOn}
-        sharing={sharing}
-        chatOpen={chatOpen}
-        peopleOpen={peopleOpen}
-        unreadChat={unreadChat}
-        onToggleMic={handleToggleMic}
-        onToggleCamera={handleToggleCamera}
-        onToggleShare={handleToggleShare}
-        onToggleChat={() => {
-          setChatOpen((v) => !v);
-          setPeopleOpen(false);
-        }}
-        onTogglePeople={() => {
-          setPeopleOpen((v) => !v);
-          setChatOpen(false);
-        }}
-        onLeave={handleLeave}
-      />
+      {/* Control Bar */}
+      <div className="pb-4">
+        <ControlBar
+          micOn={micOn}
+          cameraOn={camOn}
+          sharing={sharing}
+          chatOpen={chatOpen}
+          peopleOpen={peopleOpen}
+          unreadChat={unreadChat}
+          onToggleMic={handleToggleMic}
+          onToggleCamera={handleToggleCamera}
+          onToggleShare={handleToggleShare}
+          onToggleChat={() => {
+            setChatOpen((v) => !v);
+            setPeopleOpen(false);
+          }}
+          onTogglePeople={() => {
+            setPeopleOpen((v) => !v);
+            setChatOpen(false);
+          }}
+          onLeave={handleLeave}
+        />
+      </div>
 
       {chatOpen && (
         <ChatPanel
