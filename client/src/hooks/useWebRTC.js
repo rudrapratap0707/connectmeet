@@ -20,6 +20,19 @@ export function useWebRTC({ meetingId, name }) {
   const localStreamRef = useRef(null);
   const socketRef = useRef(null);
 
+  const removePeer = useCallback((socketId) => {
+    const pc = peerConnections.current[socketId];
+    if (pc) {
+      pc.close();
+      delete peerConnections.current[socketId];
+    }
+    setPeers((prev) => {
+      const next = { ...prev };
+      delete next[socketId];
+      return next;
+    });
+  }, []);
+
   const createPeerConnection = useCallback((socketId, remoteName) => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
@@ -53,20 +66,7 @@ export function useWebRTC({ meetingId, name }) {
 
     peerConnections.current[socketId] = pc;
     return pc;
-  }, []);
-
-  const removePeer = (socketId) => {
-    const pc = peerConnections.current[socketId];
-    if (pc) {
-      pc.close();
-      delete peerConnections.current[socketId];
-    }
-    setPeers((prev) => {
-      const next = { ...prev };
-      delete next[socketId];
-      return next;
-    });
-  };
+  }, [removePeer]);
 
   useEffect(() => {
     let active = true;
@@ -84,46 +84,102 @@ export function useWebRTC({ meetingId, name }) {
         const socket = connectSocket();
         socketRef.current = socket;
 
-        socket.on('connect', () => {
+        // Socket join logic handling both new connect and existing connection states
+        const handleJoinRoom = () => {
           setConnected(true);
           socket.emit('room:join', { meetingId, name });
-        });
+        };
 
+        socket.on('connect', handleJoinRoom);
+
+        if (socket.connected) {
+          handleJoinRoom();
+        }
+
+        // Handle initial room participants when joining
         socket.on('room:participants', (list) => {
           list.forEach(({ socketId, name: peerName }) => {
+            if (peerConnections.current[socketId]) return;
+
             const pc = createPeerConnection(socketId, peerName);
-            setPeers((prev) => ({ ...prev, [socketId]: { ...(prev[socketId] || {}), name: peerName, cameraOn: true, micOn: true } }));
+            setPeers((prev) => ({
+              ...prev,
+              [socketId]: { ...(prev[socketId] || {}), name: peerName, cameraOn: true, micOn: true }
+            }));
+
             pc.createOffer()
               .then((offer) => pc.setLocalDescription(offer).then(() => offer))
-              .then((offer) => socket.emit('webrtc:offer', { to: socketId, offer }));
+              .then((offer) => socket.emit('webrtc:offer', { to: socketId, offer }))
+              .catch((err) => console.error('Error creating offer:', err));
           });
         });
 
+        // FIX 1: Create Peer Connection when a new user joins the room
         socket.on('user:joined', ({ socketId, name: peerName }) => {
-          setPeers((prev) => ({ ...prev, [socketId]: { ...(prev[socketId] || {}), name: peerName, cameraOn: true, micOn: true } }));
+          if (peerConnections.current[socketId]) return;
+
+          createPeerConnection(socketId, peerName);
+
+          setPeers((prev) => ({
+            ...prev,
+            [socketId]: {
+              ...(prev[socketId] || {}),
+              name: peerName,
+              cameraOn: true,
+              micOn: true,
+            },
+          }));
         });
 
+        // FIX 2: Pass fallback remote name when handling unexpected incoming offer
         socket.on('webrtc:offer', async ({ from, offer }) => {
-          const pc = peerConnections.current[from] || createPeerConnection(from);
-          await pc.setRemoteDescription(new RTCSessionDescription(offer));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          socket.emit('webrtc:answer', { to: from, answer });
+          let pc = peerConnections.current[from];
+
+          if (!pc) {
+            pc = createPeerConnection(from, 'Participant');
+          }
+
+          try {
+            if (pc.signalingState !== 'stable') {
+              console.log('Ignoring offer, signalingState is:', pc.signalingState);
+              return;
+            }
+
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit('webrtc:answer', { to: from, answer });
+          } catch (err) {
+            console.error('Offer handling error:', err);
+          }
         });
 
         socket.on('webrtc:answer', async ({ from, answer }) => {
           const pc = peerConnections.current[from];
-          if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+          if (!pc) return;
+
+          try {
+            if (pc.signalingState === 'have-local-offer') {
+              await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            } else {
+              console.warn(`Ignored answer from ${from}: signalingState is ${pc.signalingState}`);
+            }
+          } catch (err) {
+            console.warn('Remote answer ignored:', err.message);
+          }
         });
 
+        // FIX 3: Resilient ICE candidate addition without hard-dropping candidates
         socket.on('webrtc:ice-candidate', async ({ from, candidate }) => {
           const pc = peerConnections.current[from];
-          if (pc && candidate) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (e) {
-              // ignore benign race errors on candidate add
-            }
+
+          if (!pc || !candidate) return;
+
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (err) {
+            console.warn('ICE failed:', err.message);
           }
         });
 
@@ -151,7 +207,15 @@ export function useWebRTC({ meetingId, name }) {
         socket.emit('room:leave');
         socket.removeAllListeners();
       }
-      Object.keys(peerConnections.current).forEach(removePeer);
+
+      Object.keys(peerConnections.current).forEach((id) => {
+        const pc = peerConnections.current[id];
+        if (pc) {
+          pc.close();
+        }
+        delete peerConnections.current[id];
+      });
+
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
       disconnectSocket();
     };
