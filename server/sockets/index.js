@@ -48,11 +48,26 @@ function registerSocketHandlers(io) {
 
         currentMeetingId = meetingId;
         socket.join(meetingId);
-        room.set(socket.id, { userId: socket.userId, name: name || 'Guest', cameraOn: true, micOn: true });
 
-        // tell existing peers about the newcomer, and newcomer about existing peers
-        socket.to(meetingId).emit('user:joined', { socketId: socket.id, name, userId: socket.userId });
-        socket.emit('room:participants', participantsList(meetingId));
+        room.set(socket.id, {
+          userId: socket.userId,
+          name: name || 'Guest',
+          cameraOn: true,
+          micOn: true,
+        });
+
+        // Notify existing users
+        socket.to(meetingId).emit('user:joined', {
+          socketId: socket.id,
+          name,
+          userId: socket.userId,
+        });
+
+        // Send ONLY existing participants to the new user
+        const existingParticipants = participantsList(meetingId).filter(
+          (p) => p.socketId !== socket.id
+        );
+        socket.emit('room:participants', existingParticipants);
       } catch (err) {
         socket.emit('room:error', { message: 'Could not join the room.' });
       }

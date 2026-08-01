@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react';
 import toast from 'react-hot-toast';
 import { Loader2, Lock } from 'lucide-react';
 import VideoTile from '../components/VideoTile.jsx';
@@ -36,8 +36,16 @@ export default function MeetingRoom() {
       .finally(() => setChecking(false));
   }, [meetingId]);
 
-  const webrtc = useMemo(() => (joined ? null : null), [joined]); // placeholder to satisfy linter ordering
-  const rtc = useWebRTC(joined ? { meetingId, name: user?.name } : { meetingId: null, name: null });
+  // FIX 1: Stable WebRTC hook instantiation without creating new object reference every render
+  const rtcParams = useMemo(
+    () => ({
+      meetingId: joined ? meetingId : null,
+      name: joined ? user?.name : null,
+    }),
+    [joined, meetingId, user?.name]
+  );
+
+  const rtc = useWebRTC(rtcParams);
 
   useEffect(() => {
     if (!joined || !rtc.socket) return;
@@ -47,8 +55,7 @@ export default function MeetingRoom() {
     };
     rtc.socket.on('chat:message', handler);
     return () => rtc.socket.off('chat:message', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [joined, rtc.socket]);
+  }, [joined, rtc.socket, chatOpen]);
 
   useEffect(() => {
     if (chatOpen) setUnreadChat(0);
@@ -77,12 +84,19 @@ export default function MeetingRoom() {
 
   const handleToggleCamera = () => setCamOn(rtc.toggleCamera());
   const handleToggleMic = () => setMicOn(rtc.toggleMic());
-  const handleToggleShare = async () => {
-    const ok = await rtc.shareScreen();
-    if (ok) setSharing(true);
-  };
-  const handleSend = (text) => rtc.sendChatMessage(user?.name, text);
 
+  // FIX 2: Correct Screen share toggle state tracking
+  const handleToggleShare = async () => {
+    if (sharing) {
+      // User clicked stop sharing
+      setSharing(false);
+      return;
+    }
+    const ok = await rtc.shareScreen();
+    setSharing(Boolean(ok));
+  };
+
+  const handleSend = (text) => rtc.sendChatMessage(user?.name, text);
   const handleLeave = () => setShowMemory(true);
 
   const finishLeave = async ({ discussion = [], decisions = [], actions = [] } = {}) => {
@@ -150,7 +164,21 @@ export default function MeetingRoom() {
   }
 
   const peerList = Object.entries(rtc.peers);
-  const activePeer = peerList[0];
+
+  // Deduplicate peers by key (socketId)
+  const uniquePeers = Array.from(
+    new Map(peerList.map(([id, peer]) => [id, peer])).entries()
+  );
+
+  // Active remote peer (if someone else is in room)
+  const activePeerEntry = uniquePeers[0];
+  const activePeerSocketId = activePeerEntry ? activePeerEntry[0] : null;
+  const activePeer = activePeerEntry ? activePeerEntry[1] : null;
+
+  // Grid list filter: excludes activePeer from grid to avoid duplicate tiles
+  const gridPeers = uniquePeers.filter(
+    ([id]) => id !== activePeerSocketId
+  );
 
   return (
     <div className="min-h-screen bg-obsidian text-pearl relative pb-32">
@@ -166,27 +194,43 @@ export default function MeetingRoom() {
       )}
 
       <main className="px-6 max-w-5xl mx-auto">
-        {/* Center: active speaker */}
+        {/* Main Stage: Shows active remote peer or local user if alone */}
         <div className="max-w-2xl mx-auto mb-8">
           <VideoTile
-            stream={activePeer ? activePeer[1].stream : rtc.localStream}
-            name={activePeer ? activePeer[1].name : `${user?.name} (you)`}
+            stream={activePeer ? activePeer.stream : rtc.localStream}
+            name={activePeer ? activePeer.name : `${user?.name} (you)`}
             muted={!activePeer}
-            micOn={activePeer ? activePeer[1].micOn : micOn}
-            cameraOn={activePeer ? activePeer[1].cameraOn : camOn}
+            micOn={activePeer ? activePeer.micOn : micOn}
+            cameraOn={activePeer ? activePeer.cameraOn : camOn}
             isSpeaking
             large
           />
         </div>
 
-        {/* Around: participant cards */}
+        {/* FIX 3: No duplicates - Grid includes non-active peers + local user */}
         <div className="flex flex-wrap justify-center gap-4">
-          <div className="w-32">
-            <VideoTile stream={rtc.localStream} name={`${user?.name} (you)`} muted micOn={micOn} cameraOn={camOn} />
-          </div>
-          {peerList.map(([socketId, peer]) => (
+          {/* Always show local user in grid when someone else is on stage */}
+          {activePeer && (
+            <div className="w-32">
+              <VideoTile
+                stream={rtc.localStream}
+                name={`${user?.name} (you)`}
+                muted
+                micOn={micOn}
+                cameraOn={camOn}
+              />
+            </div>
+          )}
+
+          {/* Render remaining peers */}
+          {gridPeers.map(([socketId, peer]) => (
             <div className="w-32" key={socketId}>
-              <VideoTile stream={peer.stream} name={peer.name} micOn={peer.micOn} cameraOn={peer.cameraOn} />
+              <VideoTile
+                stream={peer.stream}
+                name={peer.name}
+                micOn={peer.micOn}
+                cameraOn={peer.cameraOn}
+              />
             </div>
           ))}
         </div>
@@ -226,7 +270,7 @@ export default function MeetingRoom() {
         <ParticipantsPanel
           participants={[
             { name: `${user?.name}`, micOn, cameraOn: camOn, isHost: false },
-            ...peerList.map(([, p]) => ({ name: p.name, micOn: p.micOn, cameraOn: p.cameraOn })),
+            ...uniquePeers.map(([, p]) => ({ name: p.name, micOn: p.micOn, cameraOn: p.cameraOn })),
           ]}
           selfName={user?.name}
           onClose={() => setPeopleOpen(false)}
